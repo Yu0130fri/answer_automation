@@ -523,7 +523,9 @@ class AnswerQuestionnaire:
 
 
 def _write_unable_to_answer_urls(urls: list[str]) -> None:
+    urls_list: list[list[str]] = []
+    for url in urls:
+        urls_list.append([url])
     with open(_UNABLE_TO_URL, "a") as f:
         writer = csv.writer(f)
-        for url in urls:
-            writer.writerow(url)
+        writer.writerows(urls_list)
