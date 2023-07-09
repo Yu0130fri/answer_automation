@@ -41,10 +41,9 @@ class AnswerQuestionnaire:
 
         with open(_UNABLE_TO_URL, "r") as f:
             reader = csv.reader(f)
+            unable_to_answer_urls = [url[0] for url in reader]
 
-            _unable_to_answer_urls = [url[0] for url in reader]
-
-        self._unable_to_answer_urls = _unable_to_answer_urls
+        self._unable_to_answer_urls = unable_to_answer_urls
 
     def _option_add_argument(self) -> None:
         self._options.add_argument("--headless")
@@ -198,7 +197,7 @@ class AnswerQuestionnaire:
                         )
                 else:
                     continue
-            sleep(2)
+            sleep(1)
             # TODO
             tabindexes = driver.find_elements(By.XPATH, "//input[@tabindex]")
 
@@ -429,15 +428,11 @@ class AnswerQuestionnaire:
                 except Exception:
                     continue
         except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            exception_sentence = [e.strip() for e in exception_sentence]
             print("====")
-            print(exception_sentence)
+            print(e)
             print("====")
             print("動画再生でエラーが発生しました。")
-            driver.close()
+            return
 
     def answer(self) -> None:
         urls = self.get_questionnaire_urls()
@@ -455,7 +450,7 @@ class AnswerQuestionnaire:
         start = time.time()
         for url in reversed(urls):
             elapsed_time = time.time()
-            if elapsed_time - start > 60 * 60:  # 1時間以上経過すると自動で終了させる
+            if elapsed_time - start > 60 * 90:  # 1時間30分以上経過すると自動で終了させる
                 break
 
             if url in self._unable_to_answer_urls:
@@ -503,7 +498,7 @@ class AnswerQuestionnaire:
                     continue
 
                 checked_onclick_attr = self.check_onclick_attr(driver)
-                sleep(6)
+                sleep(3)
                 if checked_onclick_attr:
                     print("回答を完了しました！", url)
                 else:
@@ -526,6 +521,6 @@ def _write_unable_to_answer_urls(urls: list[str]) -> None:
     urls_list: list[list[str]] = []
     for url in urls:
         urls_list.append([url])
-    with open(_UNABLE_TO_URL, "a") as f:
+    with open(_UNABLE_TO_URL, "w") as f:
         writer = csv.writer(f)
         writer.writerows(urls_list)
