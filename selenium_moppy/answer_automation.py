@@ -146,9 +146,6 @@ class AnswerQuestionnaire:
             for policy_checkbox in policy_checkboxes:
                 try:
                     policy_checkbox.click()
-                except ElementNotInteractableException:
-                    print("ElementNotInteractableExceptionによりcheckboxはclickはできませんでした")
-                    continue
                 except Exception:
                     continue
 
@@ -192,9 +189,7 @@ class AnswerQuestionnaire:
                     try:
                         checkbox.click()
                     except ElementNotInteractableException:
-                        print(
-                            "//input[@type='checkbox']でElementNotInteractableExceptionが発生していました"
-                        )
+                        continue
                 else:
                     continue
             sleep(1)
@@ -205,7 +200,7 @@ class AnswerQuestionnaire:
                 try:
                     check_box.click()
                 except ElementClickInterceptedException:
-                    print("ElementClickInterceptedExceptionによりclickができませんでした")
+                    continue
 
             index: int = 1
             for i in range(len(tabindexes)):
@@ -234,8 +229,6 @@ class AnswerQuestionnaire:
                 radio.send_keys(_dummy_text)
             sleep(1)
             return
-        except ElementNotInteractableException:
-            print("//input[@type='text']でElementNotInteractableExceptionが発生しました。")
         except Exception as e:
             exception_sentence = traceback.format_exception(
                 etype=Exception, value=e, tb=None
@@ -281,11 +274,7 @@ class AnswerQuestionnaire:
                 except ElementNotInteractableException:
                     print("//select[@onfocus]でElementNotInteractableExceptionが発生しました")
                     break
-                except Exception as e:
-                    exception = traceback.format_exception(
-                        etype=Exception, value=e, tb=None
-                    )
-                    print(exception[0])
+                except Exception:
                     break
 
         try:
@@ -330,7 +319,7 @@ class AnswerQuestionnaire:
         sleep(1)
         driver.switch_to.window(main_tab)
 
-        sleep(3)
+        sleep(2)
         checkbox_elems = driver.find_elements(
             By.XPATH, "//input[@type='checkbox'][@tabindex]"
         )
@@ -463,11 +452,7 @@ class AnswerQuestionnaire:
                     for btn in answer_btn:
                         try:
                             btn.click()
-                        except Exception as e:
-                            exception_sentence = traceback.format_exception(
-                                etype=Exception, value=e, tb=None
-                            )
-                            print(exception_sentence[0])
+                        except Exception:
                             continue
 
                 # 同意ボタンをクリックする
@@ -498,7 +483,7 @@ class AnswerQuestionnaire:
                     continue
 
                 checked_onclick_attr = self.check_onclick_attr(driver)
-                sleep(3)
+                sleep(2)
                 if checked_onclick_attr:
                     print("回答を完了しました！", url)
                 else:

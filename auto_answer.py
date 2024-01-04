@@ -11,11 +11,8 @@ parser.add_argument("--password", type=str, help="your password")
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    print("アンケート回答開始しました")
-    print("===")
+    print("======アンケート回答開始しました======")
     subprocess.run(
         ["python3", str(_CLI), "--email", args.email, "--password", args.password]
     )
-
-    print("===")
-    print("アンケートの回答実行を終了しました")
+    print("======アンケートの回答実行を終了しました======")
