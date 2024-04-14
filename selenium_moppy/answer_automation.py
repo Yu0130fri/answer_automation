@@ -167,7 +167,6 @@ class AnswerQuestionnaire:
                 try:
                     radio.click()
                 except ElementNotInteractableException:
-                    print("ElementNotInteractableExceptionによりradioボタンがclickはできませんでした")
                     continue
         except Exception as e:
             exception_sentence = traceback.format_exception(
@@ -213,11 +212,9 @@ class AnswerQuestionnaire:
                     continue
         except NoSuchElementException:
             return
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            print("Exception Error in Checkbox")
+            return
 
     def write_text(self, driver: webdriver.Chrome) -> None:
         _dummy_text = "31"
@@ -229,11 +226,8 @@ class AnswerQuestionnaire:
                 radio.send_keys(_dummy_text)
             sleep(1)
             return
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            print("Exception raised in text input")
 
         try:
             text_forms = driver.find_elements(By.XPATH, "//input[@type='tel']")
@@ -301,11 +295,8 @@ class AnswerQuestionnaire:
             sleep(1)
         except ElementNotInteractableException:
             print("ElementNotInteractableExceptionでドロップダウン設問が回答できませんでした。")
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            print("Exception raised in dropdown")
 
     def click_a_href(self, driver: webdriver.Chrome) -> None:
         # _blankでタブが変更してしまうときの対策
@@ -349,11 +340,8 @@ class AnswerQuestionnaire:
                 "//input[@type='submit']でElementClickInterceptedExceptionが発生しました。ブラウザで回答が推奨されるためskipします。"
             )
             return False
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            print("ブラウザで回答が推奨されるためskipします")
 
         try:
             onclick_buttons = driver.find_elements(By.XPATH, "//*[@onclick]")
@@ -365,11 +353,8 @@ class AnswerQuestionnaire:
                 except Exception:
                     continue
             return True
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            pass
 
         try:
             onclick_btn = driver.find_element(By.XPATH, "//*[id='next']")
@@ -381,11 +366,8 @@ class AnswerQuestionnaire:
             print(
                 "//*[id='next']でElementClickInterceptedExceptionが発生しました。ブラウザで回答が推奨されるためskipします。"
             )
-        except Exception as e:
-            exception_sentence = traceback.format_exception(
-                etype=Exception, value=e, tb=None
-            )
-            print(exception_sentence[0])
+        except Exception:
+            return False
 
         return False
 
@@ -459,7 +441,7 @@ class AnswerQuestionnaire:
                 self.check_policy_checkbox(driver)
 
                 has_onclick_attr: bool = True
-                sleep(3)
+                sleep(1)
                 answer_count: int = 0
                 while has_onclick_attr:
                     self.select_all_type_btn(driver)
@@ -475,11 +457,7 @@ class AnswerQuestionnaire:
                     btn.click()
                 except NoSuchElementException:
                     pass
-                except Exception as e:
-                    exception_sentence = traceback.format_exception(
-                        etype=Exception, value=e, tb=None
-                    )
-                    print(exception_sentence[0])
+                except Exception:
                     continue
 
                 checked_onclick_attr = self.check_onclick_attr(driver)
@@ -498,7 +476,6 @@ class AnswerQuestionnaire:
                 continue
 
         driver.close()
-        print("すべての回答を終了しました")
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
 
 
