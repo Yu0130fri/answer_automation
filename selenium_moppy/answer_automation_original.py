@@ -28,9 +28,6 @@ questionnaire_url = "https://pc.moppy.jp/research/"
 options = Options()
 options.add_argument("--headless")
 
-# ページに排他や混雑を示す文言がある場合に検出するためのキーワード
-LOCK_KEYWORDS = ["排他", "ただいま混み合", "混雑", "アクセスが集中", "回答できません", "アクセス制限"]
-
 
 class AnswerQuestionnaire:
     def __init__(self, email: str, password: str) -> None:
@@ -49,31 +46,6 @@ class AnswerQuestionnaire:
 
     def _option_add_argument(self) -> None:
         self._options.add_argument("--headless")
-
-    def _create_driver(self) -> webdriver.Chrome:
-        self._option_add_argument()
-        return webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
-
-    def _load_cookies(self, driver: webdriver.Chrome) -> None:
-        if not os.path.exists(self._cookie_file):
-            return
-        cookies = pickle.load(open(self._cookie_file, "rb"))
-        driver.get(self._login_url)
-        for c in cookies:
-            try:
-                driver.add_cookie(c)
-            except Exception:
-                continue
-
-    def _detect_lock(self, driver: webdriver.Chrome) -> bool:
-        try:
-            text = driver.page_source
-            for kw in LOCK_KEYWORDS:
-                if kw in text:
-                    return True
-        except Exception:
-            return False
-        return False
 
     def save_cookie_as_pickle(self) -> None:
         """一度ログインしてcookieを保存、その後cookieを保持してアンケート画面へ遷移する"""
@@ -182,17 +154,11 @@ class AnswerQuestionnaire:
             return
 
     def click_radio(self, driver: webdriver.Chrome) -> None:
-        # デフォルトではvalue='1'を優先する
         try:
-            radio_buttons = driver.find_elements(By.XPATH, "//input[@type='radio'][@value='1']")
+            radio_buttons = driver.find_elements(
+                By.XPATH, "//input[@type='radio'][@value='1']"
+            )
             if len(radio_buttons) == 0:
-                # value=1が無ければ最初に見つかったラジオをクリックする
-                radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
-                for r in radios:
-                    try:
-                        r.click()
-                    except ElementNotInteractableException:
-                        continue
                 return
 
             for radio in radio_buttons:
@@ -202,52 +168,6 @@ class AnswerQuestionnaire:
                     continue
         except Exception:
             pass
-
-    def click_radio_with_values(self, driver: webdriver.Chrome, values: list[str]) -> None:
-        """ラジオボタンをグループごとに優先値で選択する
-        values は優先的に選ぶ value 属性のリスト
-        """
-        try:
-            radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
-            if len(radios) == 0:
-                return
-
-            # グループ化（name属性ごと）
-            names = []
-            for r in radios:
-                try:
-                    name = r.get_attribute("name")
-                except Exception:
-                    name = None
-                if name and name not in names:
-                    names.append(name)
-
-            for name in names:
-                clicked = False
-                for v in values:
-                    try:
-                        elem = driver.find_element(By.XPATH, f"//input[@type='radio' and @name='{name}' and @value='{v}']")
-                        try:
-                            elem.click()
-                            clicked = True
-                            break
-                        except ElementNotInteractableException:
-                            continue
-                    except NoSuchElementException:
-                        continue
-
-                if not clicked:
-                    # 候補のいずれもクリックできなければ、そのグループの最初の選択肢をクリック
-                    try:
-                        first_elem = driver.find_element(By.XPATH, f"//input[@type='radio' and @name='{name}']")
-                        try:
-                            first_elem.click()
-                        except ElementNotInteractableException:
-                            continue
-                    except Exception:
-                        continue
-        except Exception:
-            return
 
     def click_checkbox(self, driver: webdriver.Chrome) -> None:
         try:
@@ -432,12 +352,9 @@ class AnswerQuestionnaire:
 
         return False
 
-    def select_all_type_btn(self, driver: webdriver.Chrome, radio_values: list[str] | None = None) -> None:
+    def select_all_type_btn(self, driver: webdriver.Chrome) -> None:
         # radioボタン
-        if radio_values:
-            self.click_radio_with_values(driver, radio_values)
-        else:
-            self.click_radio(driver)
+        self.click_radio(driver)
         # checkbox
         self.click_checkbox(driver)
         # テキストフォーム
@@ -485,9 +402,13 @@ class AnswerQuestionnaire:
     def answer(self) -> None:
         urls = self.get_questionnaire_urls()
         sleep(1)
-        driver = self._create_driver()
-        # クッキーを追加
-        self._load_cookies(driver)
+        driver = webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
+        driver.get(login_url)
+
+        cookies = pickle.load(open(cookies_file, "rb"))
+        # login and add cookie
+        for c in cookies:
+            driver.add_cookie(c)
 
         start = time.time()
         for url in reversed(urls):
@@ -501,77 +422,51 @@ class AnswerQuestionnaire:
                 continue
 
             try:
-                # 試すラジオの優先値のバリエーション
-                variants = [["1"], ["2"], ["3"]]
-                success = False
-                for radio_vals in variants:
-                    driver.get(url)
+                driver.get(url)
 
-                    answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
-                    if answer_btn:
-                        for btn in answer_btn:
-                            try:
-                                btn.click()
-                            except Exception:
-                                continue
-
-                    # macromill
-                    answer_btns = driver.find_elements(By.NAME, "nextButton")
-                    if answer_btns:
-                        for answer_btn in answer_btns:
-                            try:
-                                answer_btn.click()
-                            except Exception:
-                                continue
-
-                    # 同意ボタンをクリックする
-                    self.check_policy_checkbox(driver)
-
-                    has_onclick_attr: bool = True
-                    sleep(2)
-                    answer_count: int = 0
-                    lock_detected = False
-                    while has_onclick_attr:
-                        self.select_all_type_btn(driver, radio_values=radio_vals)
-                        answer_count += 1
-                        sleep(1)
-                        has_onclick_attr = self.check_onclick_attr(driver)
-
-                        # ページに排他や混雑を示す要素が無いか検出
-                        if self._detect_lock(driver):
-                            lock_detected = True
-                            break
-
-                        # 50回クリックする動作が発生した時回答を終了させる
-                        if answer_count > 50:
-                            break
-
-                    if lock_detected:
-                        # 違う回答バリエーションで再トライ
-                        continue
-
-                    try:
-                        btn = driver.find_element(By.XPATH, "//a[contains(@class, 'btn')]")
+                answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
+                if answer_btn:
+                    for btn in answer_btn:
                         try:
                             btn.click()
                         except Exception:
-                            pass
-                    except NoSuchElementException:
-                        pass
-                    except Exception:
-                        continue
+                            continue
 
-                    checked_onclick_attr = self.check_onclick_attr(driver)
-                    sleep(2)
-                    if checked_onclick_attr:
-                        print("回答を完了しました！", url)
-                        success = True
+                # macromill
+                answer_btns = driver.find_elements(By.NAME, "nextButton")
+                if answer_btns:
+                    for answer_btn in answer_btns:
+                        answer_btn.click()
+
+                # 同意ボタンをクリックする
+                self.check_policy_checkbox(driver)
+
+                has_onclick_attr: bool = True
+                sleep(2)
+                answer_count: int = 0
+                while has_onclick_attr:
+                    self.select_all_type_btn(driver)
+                    answer_count += 1
+                    sleep(1)
+                    has_onclick_attr = self.check_onclick_attr(driver)
+
+                    # 40回クリックする動作が発生した時回答を終了させる
+                    if answer_count > 50:
                         break
-                    else:
-                        # 次のバリエーションで再試行
-                        continue
 
-                if not success:
+                try:
+                    btn = driver.find_element(By.XPATH, "//a[contains(@class, 'btn')]")
+                    btn.click()
+                except NoSuchElementException:
+                    pass
+                except Exception:
+                    continue
+
+                checked_onclick_attr = self.check_onclick_attr(driver)
+                sleep(2)
+                if checked_onclick_attr:
+                    print("回答を完了しました！", url)
+                else:
                     print("回答を完了できなかったアンケート: ", url)
                     self._unable_to_answer_urls.append(url)
             except ElementNotInteractableException:
