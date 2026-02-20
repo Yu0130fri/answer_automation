@@ -16,6 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.select import Select
+from typing import Optional, List
 
 _CURRENT_DIR = Path(__file__).absolute().parent.parent
 _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
@@ -29,7 +30,14 @@ options = Options()
 options.add_argument("--headless")
 
 # ページに排他や混雑を示す文言がある場合に検出するためのキーワード
-LOCK_KEYWORDS = ["排他", "ただいま混み合", "混雑", "アクセスが集中", "回答できません", "アクセス制限"]
+LOCK_KEYWORDS = [
+    "排他",
+    "ただいま混み合",
+    "混雑",
+    "アクセスが集中",
+    "回答できません",
+    "アクセス制限",
+]
 
 
 class AnswerQuestionnaire:
@@ -115,19 +123,32 @@ class AnswerQuestionnaire:
 
         return False
 
-    def get_questionnaire_urls(self) -> list[str]:
-        """アンケートURLを全て取得する（DBやjsonなどに保存するかは検討中）"""
-        self._option_add_argument()
-        driver = webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
+    def get_questionnaire_urls(
+        self, driver: Optional[webdriver.Chrome] = None
+    ) -> List[str]:
+        """アンケートURLを全て取得する（DBやjsonなどに保存するかは検討中）
+        引数に`driver`を渡すとそのドライバを使って取得する。
+        """
+        created_driver = False
+        if driver is None:
+            self._option_add_argument()
+            driver = webdriver.Chrome(
+                executable_path=_DRIVER_PATH, options=self._options
+            )
+            created_driver = True
 
-        cookies = pickle.load(open(cookies_file, "rb"))
-        driver.get(login_url)
+            cookies = pickle.load(open(cookies_file, "rb"))
+            driver.get(login_url)
 
-        # login and add cookie
-        for c in cookies:
-            driver.add_cookie(c)
-        driver.get(questionnaire_url)
-        sleep(2)
+            # login and add cookie
+            for c in cookies:
+                driver.add_cookie(c)
+            driver.get(questionnaire_url)
+            sleep(2)
+        else:
+            # assume driver is already logged in or has cookies set
+            driver.get(questionnaire_url)
+            sleep(2)
 
         count_eligible_questionnaire_str = (
             str(driver.find_element(By.XPATH, "//span[@class = 'a-list__total']").text)
@@ -137,18 +158,14 @@ class AnswerQuestionnaire:
         )
         count_eligible_questionnaire: int
         try:
-            count_eligible_questionnaire = int(
-                count_eligible_questionnaire_str
-            )
+            count_eligible_questionnaire = int(count_eligible_questionnaire_str)
         except ValueError:
             count_eligible_questionnaire = 30
 
         count_scroll = count_eligible_questionnaire // 5
         for _ in range(count_scroll):
             try:
-                scroll_btn = driver.find_element(
-                    By.CLASS_NAME, 'a-btn__more--down'
-                )
+                scroll_btn = driver.find_element(By.CLASS_NAME, "a-btn__more--down")
                 scroll_btn.click()
                 sleep(2)
             except Exception:
@@ -159,7 +176,8 @@ class AnswerQuestionnaire:
         )
 
         if len(able_to_answer_urls) == 0:
-            driver.close()
+            if created_driver:
+                driver.close()
             raise ValueError("回答できるアンケートが存在しませんでした。")
 
         urls = [url.get_attribute("href") for url in able_to_answer_urls]
@@ -184,7 +202,9 @@ class AnswerQuestionnaire:
     def click_radio(self, driver: webdriver.Chrome) -> None:
         # デフォルトではvalue='1'を優先する
         try:
-            radio_buttons = driver.find_elements(By.XPATH, "//input[@type='radio'][@value='1']")
+            radio_buttons = driver.find_elements(
+                By.XPATH, "//input[@type='radio'][@value='1']"
+            )
             if len(radio_buttons) == 0:
                 # value=1が無ければ最初に見つかったラジオをクリックする
                 radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
@@ -203,7 +223,9 @@ class AnswerQuestionnaire:
         except Exception:
             pass
 
-    def click_radio_with_values(self, driver: webdriver.Chrome, values: list[str]) -> None:
+    def click_radio_with_values(
+        self, driver: webdriver.Chrome, values: List[str]
+    ) -> None:
         """ラジオボタンをグループごとに優先値で選択する
         values は優先的に選ぶ value 属性のリスト
         """
@@ -226,7 +248,10 @@ class AnswerQuestionnaire:
                 clicked = False
                 for v in values:
                     try:
-                        elem = driver.find_element(By.XPATH, f"//input[@type='radio' and @name='{name}' and @value='{v}']")
+                        elem = driver.find_element(
+                            By.XPATH,
+                            f"//input[@type='radio' and @name='{name}' and @value='{v}']",
+                        )
                         try:
                             elem.click()
                             clicked = True
@@ -239,7 +264,9 @@ class AnswerQuestionnaire:
                 if not clicked:
                     # 候補のいずれもクリックできなければ、そのグループの最初の選択肢をクリック
                     try:
-                        first_elem = driver.find_element(By.XPATH, f"//input[@type='radio' and @name='{name}']")
+                        first_elem = driver.find_element(
+                            By.XPATH, f"//input[@type='radio' and @name='{name}']"
+                        )
                         try:
                             first_elem.click()
                         except ElementNotInteractableException:
@@ -349,24 +376,54 @@ class AnswerQuestionnaire:
 
             for select_elem in select_elems:
                 select = Select(select_elem)
-                try:
-                    select.select_by_value("1999")  # 年代のdropdown
-                except Exception:
-                    select.select_by_index(1)  # 代表して2番目の要素を選択
+                # 優先的に選びたい値の順
+                preferred_values = ["1999", "09", "9"]
+                chosen = False
+                for pv in preferred_values:
+                    try:
+                        select.select_by_value(pv)
+                        chosen = True
+                        break
+                    except Exception:
+                        continue
 
-                try:
-                    select.select_by_value("09")  # 月（日）のdropdown
-                except Exception:
-                    select.select_by_index(1)  # 代表して2番目の要素を選択
-
-                try:
-                    select.select_by_value("9")  # 月（日）のdropdown
-                except Exception:
-                    select.select_by_index(1)  # 代表して2番目の要素を選択
+                if not chosen:
+                    # 2番目以降の有効な option を探して選択する。クリック不可ならJSで値を設定する
+                    try:
+                        options = select_elem.find_elements(By.TAG_NAME, "option")
+                        idx = 0
+                        for i, opt in enumerate(options):
+                            try:
+                                disabled = opt.get_attribute("disabled")
+                            except Exception:
+                                disabled = None
+                            if disabled:
+                                continue
+                            # skip empty values which often are placeholder
+                            val = opt.get_attribute("value") or ""
+                            if val.strip() == "":
+                                continue
+                            idx = i
+                            break
+                        try:
+                            select.select_by_index(idx)
+                        except Exception:
+                            # fallback: set via JS
+                            try:
+                                val = options[idx].get_attribute("value")
+                                driver.execute_script(
+                                    "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));",
+                                    select_elem,
+                                    val,
+                                )
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
             sleep(1)
-
         except Exception:
-            print("Exception raised in dropdown")
+            # dropdown の操作で例外が出ても処理を継続する
+            return
 
     def click_a_href(self, driver: webdriver.Chrome) -> None:
         # _blankでタブが変更してしまうときの対策
@@ -432,7 +489,9 @@ class AnswerQuestionnaire:
 
         return False
 
-    def select_all_type_btn(self, driver: webdriver.Chrome, radio_values: list[str] | None = None) -> None:
+    def select_all_type_btn(
+        self, driver: webdriver.Chrome, radio_values: Optional[List[str]] = None
+    ) -> None:
         # radioボタン
         if radio_values:
             self.click_radio_with_values(driver, radio_values)
@@ -505,6 +564,7 @@ class AnswerQuestionnaire:
                 variants = [["1"], ["2"], ["3"]]
                 success = False
                 for radio_vals in variants:
+                    print(f"{url}のアンケートを回答します")
                     driver.get(url)
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
@@ -551,7 +611,9 @@ class AnswerQuestionnaire:
                         continue
 
                     try:
-                        btn = driver.find_element(By.XPATH, "//a[contains(@class, 'btn')]")
+                        btn = driver.find_element(
+                            By.XPATH, "//a[contains(@class, 'btn')]"
+                        )
                         try:
                             btn.click()
                         except Exception:
@@ -584,9 +646,143 @@ class AnswerQuestionnaire:
         driver.close()
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
 
+    def answer_with_driver(self, driver: webdriver.Chrome, urls: List[str]) -> None:
+        """既存のドライバを使ってアンケートに回答するロジック（`answer()`の内部ループを抽出）"""
+        sleep(1)
 
-def _write_unable_to_answer_urls(urls: list[str]) -> None:
-    urls_list: list[list[str]] = []
+        start = time.time()
+        for url in reversed(urls):
+            elapsed_time = time.time()
+
+            # 1時間30分以上経過すると自動で終了させる
+            if elapsed_time - start > 60 * 90:
+                break
+
+            if url in self._unable_to_answer_urls:
+                continue
+
+            try:
+                # 試すラジオの優先値のバリエーション
+                variants = [["1"], ["2"], ["3"]]
+                success = False
+                for radio_vals in variants:
+                    print(f"{url}のアンケートを回答します")
+                    driver.get(url)
+
+                    answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
+                    if answer_btn:
+                        for btn in answer_btn:
+                            try:
+                                btn.click()
+                            except Exception:
+                                continue
+
+                    # macromill
+                    answer_btns = driver.find_elements(By.NAME, "nextButton")
+                    if answer_btns:
+                        for answer_btn in answer_btns:
+                            try:
+                                answer_btn.click()
+                            except Exception:
+                                continue
+
+                    # 同意ボタンをクリックする
+                    self.check_policy_checkbox(driver)
+
+                    has_onclick_attr: bool = True
+                    sleep(2)
+                    answer_count: int = 0
+                    lock_detected = False
+                    while has_onclick_attr:
+                        self.select_all_type_btn(driver, radio_values=radio_vals)
+                        answer_count += 1
+                        sleep(1)
+                        has_onclick_attr = self.check_onclick_attr(driver)
+
+                        # ページに排他や混雑を示す要素が無いか検出
+                        if self._detect_lock(driver):
+                            lock_detected = True
+                            break
+
+                        # 50回クリックする動作が発生した時回答を終了させる
+                        if answer_count > 50:
+                            break
+
+                    if lock_detected:
+                        # 違う回答バリエーションで再トライ
+                        continue
+
+                    try:
+                        btn = driver.find_element(
+                            By.XPATH, "//a[contains(@class, 'btn')]"
+                        )
+                        try:
+                            btn.click()
+                        except Exception:
+                            pass
+                    except NoSuchElementException:
+                        pass
+                    except Exception:
+                        continue
+
+                    checked_onclick_attr = self.check_onclick_attr(driver)
+                    sleep(2)
+                    if checked_onclick_attr:
+                        print("回答を完了しました！", url)
+                        success = True
+                        break
+                    else:
+                        # 次のバリエーションで再試行
+                        continue
+
+                if not success:
+                    print("回答を完了できなかったアンケート: ", url)
+                    self._unable_to_answer_urls.append(url)
+            except ElementNotInteractableException:
+                self._unable_to_answer_urls.append(url)
+            except Exception:
+                print("回答を完了できなかったアンケート: ", url)
+                self._unable_to_answer_urls.append(url)
+                continue
+
+        driver.close()
+        _write_unable_to_answer_urls(self._unable_to_answer_urls)
+
+    def run(self) -> None:
+        """1つのセッションでログインしてそのまま回答処理を進めるためのユーティリティメソッド"""
+        # create driver and login
+        self._option_add_argument()
+        driver = webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
+        driver.get(self._login_url)
+
+        # login
+        email_form = driver.find_element(By.XPATH, "//input[@name='mail']")
+        email_form.send_keys(self._email)
+        password_form = driver.find_element(By.XPATH, "//input[@name='pass']")
+        password_form.send_keys(self._password)
+        sleep(3)
+
+        submit_button = driver.find_element(
+            By.XPATH, "//button[@data-ga-label='ログイン']"
+        )
+        submit_button.submit()
+
+        if self._check_success_login(driver):
+            logging.info("login success!")
+        else:
+            logging.info("login failed!")
+
+        # 移動してアンケート取得 → 回答 (同一ドライバを利用)
+        urls = self.get_questionnaire_urls(driver=driver)
+        try:
+            self.answer_with_driver(driver, urls)
+        except Exception:
+            # answer_with_driver 内で driver.close() を呼ぶためここでは何もしない
+            pass
+
+
+def _write_unable_to_answer_urls(urls: List[str]) -> None:
+    urls_list: List[List[str]] = []
     for url in urls:
         urls_list.append([url])
     with open(_UNABLE_TO_URL, "w") as f:
