@@ -18,6 +18,10 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.select import Select
 from typing import Optional, List
 from urllib.parse import urlparse, urljoin
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 _CURRENT_DIR = Path(__file__).absolute().parent.parent
 _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
@@ -101,6 +105,93 @@ class AnswerQuestionnaire:
         except Exception:
             return False
         return False
+
+    def _check_driver_resource(self, driver: webdriver.Chrome, cpu_thresh: float = 80.0, mem_mb_thresh: float = 500.0):
+        """ドライバ（とその子プロセス）のCPU%とRSS(MB)を取得し、閾値を超えているか判定する。
+        psutil がなければ常に False を返す。
+        戻り値: (overloaded: bool, cpu_percent: float, mem_mb: float)
+        """
+        if psutil is None:
+            return False, 0.0, 0.0
+
+        try:
+            pid = None
+            try:
+                pid = driver.service.process.pid
+            except Exception:
+                # Selenium の別実装向け
+                try:
+                    pid = driver.service.process._proc.pid
+                except Exception:
+                    pid = None
+
+            if pid is None:
+                return False, 0.0, 0.0
+
+            p = psutil.Process(pid)
+            children = p.children(recursive=True)
+
+            # cpu_percent は 2 回呼び出す必要がある実装もあるため、短時間のサンプルを取る
+            total_cpu = p.cpu_percent(interval=0.1)
+            total_rss = p.memory_info().rss
+            for c in children:
+                try:
+                    total_cpu += c.cpu_percent(interval=0.0)
+                    total_rss += c.memory_info().rss
+                except Exception:
+                    continue
+
+            mem_mb = total_rss / (1024 * 1024)
+            overloaded = (total_cpu > cpu_thresh) or (mem_mb > mem_mb_thresh)
+            return overloaded, total_cpu, mem_mb
+        except Exception:
+            return False, 0.0, 0.0
+
+    def _restart_driver_preserve_cookies(self, driver: webdriver.Chrome):
+        """現在のdriverからクッキーを取得して安全に再起動し、可能なら元のURLへ復帰する。"""
+        cookies = []
+        current = None
+        try:
+            cookies = driver.get_cookies() or []
+        except Exception:
+            cookies = []
+        try:
+            current = driver.current_url
+        except Exception:
+            current = None
+
+        try:
+            driver.quit()
+        except Exception:
+            try:
+                driver.close()
+            except Exception:
+                pass
+
+        new_driver = self._create_driver()
+
+        # cookies を追加するためにベースドメインへ移動
+        if cookies:
+            try:
+                base = urlparse(self._login_url).scheme + "://" + urlparse(self._login_url).hostname
+                new_driver.get(base)
+                for c in cookies:
+                    try:
+                        # Selenium requires domain/path consistency; add only safe keys
+                        new_driver.add_cookie(c)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # 元のページへ戻す
+        if current:
+            try:
+                new_driver.get(current)
+            except Exception:
+                pass
+
+        return new_driver
 
     def save_cookie_as_pickle(self) -> None:
         """一度ログインしてcookieを保存、その後cookieを保持してアンケート画面へ遷移する"""
@@ -602,6 +693,12 @@ class AnswerQuestionnaire:
         self._load_cookies(driver)
 
         start = time.time()
+        # 監視・再起動用の設定
+        consecutive_overload = 0
+        overload_check_threshold = 3  # 連続して超過した回数で再起動
+        restart_count = 0
+        max_restarts = 3
+
         for url in reversed(urls):
             elapsed_time = time.time()
 
@@ -654,6 +751,36 @@ class AnswerQuestionnaire:
                         if self._detect_lock(driver):
                             lock_detected = True
                             break
+
+                        # リソース監視: 過負荷検出
+                        overloaded, cpu_p, mem_mb = self._check_driver_resource(driver)
+                        if overloaded:
+                            consecutive_overload += 1
+                            if consecutive_overload >= overload_check_threshold:
+                                restart_count += 1
+                                print(f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。")
+                                # 再起動回数上限を超えたらそのURLをスキップ
+                                if restart_count > max_restarts:
+                                    print(f"再起動上限に達したためスキップします: {url}")
+                                    self._unable_to_answer_urls.append(url)
+                                    lock_detected = True
+                                    break
+
+                                # driver を再作成・復旧
+                                try:
+                                    driver = self._restart_driver_preserve_cookies(driver)
+                                except Exception:
+                                    # 再起動失敗時はスキップ
+                                    print(f"ドライバ再起動に失敗しました。{url} をスキップします。")
+                                    self._unable_to_answer_urls.append(url)
+                                    lock_detected = True
+                                    break
+
+                                consecutive_overload = 0
+                                # 再起動後は現在のアンケートページへ戻って続行
+                                continue
+                        else:
+                            consecutive_overload = 0
 
                         # 50回クリックする動作が発生した時回答を終了させる
                         if answer_count > 50:
@@ -704,6 +831,11 @@ class AnswerQuestionnaire:
         sleep(1)
 
         start = time.time()
+        # 監視・再起動用の設定
+        consecutive_overload = 0
+        overload_check_threshold = 3
+        restart_count = 0
+        max_restarts = 3
         for url in reversed(urls):
             elapsed_time = time.time()
 
@@ -756,6 +888,30 @@ class AnswerQuestionnaire:
                         if self._detect_lock(driver):
                             lock_detected = True
                             break
+
+                        # リソース監視
+                        overloaded, cpu_p, mem_mb = self._check_driver_resource(driver)
+                        if overloaded:
+                            consecutive_overload += 1
+                            if consecutive_overload >= overload_check_threshold:
+                                restart_count += 1
+                                print(f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。")
+                                if restart_count > max_restarts:
+                                    print(f"再起動上限に達したためスキップします: {url}")
+                                    self._unable_to_answer_urls.append(url)
+                                    lock_detected = True
+                                    break
+                                try:
+                                    driver = self._restart_driver_preserve_cookies(driver)
+                                except Exception:
+                                    print(f"ドライバ再起動に失敗しました。{url} をスキップします。")
+                                    self._unable_to_answer_urls.append(url)
+                                    lock_detected = True
+                                    break
+                                consecutive_overload = 0
+                                continue
+                        else:
+                            consecutive_overload = 0
 
                         # 50回クリックする動作が発生した時回答を終了させる
                         if answer_count > 50:
