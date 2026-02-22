@@ -17,6 +17,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.select import Select
 from typing import Optional, List
+from urllib.parse import urlparse, urljoin
 
 _CURRENT_DIR = Path(__file__).absolute().parent.parent
 _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
@@ -60,6 +61,24 @@ class AnswerQuestionnaire:
 
     def _create_driver(self) -> webdriver.Chrome:
         self._option_add_argument()
+        # 軽量化オプション: 画像や自動再生を無効にしてレンダリング負荷を下げる
+        prefs = {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.media_stream": 2,
+        }
+        try:
+            self._options.add_experimental_option("prefs", prefs)
+        except Exception:
+            # 古いオプションAPIで失敗しても続行
+            pass
+        # 一般的な軽量化フラグ
+        self._options.add_argument("--disable-gpu")
+        self._options.add_argument("--disable-extensions")
+        self._options.add_argument("--disable-dev-shm-usage")
+        self._options.add_argument("--no-sandbox")
+        # 自動再生を抑制
+        self._options.add_argument("--autoplay-policy=user-gesture-required")
+
         return webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
 
     def _load_cookies(self, driver: webdriver.Chrome) -> None:
@@ -426,17 +445,51 @@ class AnswerQuestionnaire:
             return
 
     def click_a_href(self, driver: webdriver.Chrome) -> None:
-        # _blankでタブが変更してしまうときの対策
-        main_tab = driver.current_window_handle
+        # 新しいタブを増やすとリソース消費が増えるため、可能な限り同タブ遷移で処理する。
+        # 外部ドメイン（pc.moppy.jp 以外）はスキップする。
         href_links = driver.find_elements(By.XPATH, "//a[@href]")
         if len(href_links) == 0:
             return
-        for link in href_links:
-            sleep(1)
-            link.send_keys(Keys.CONTROL, Keys.ENTER)
-        sleep(1)
-        driver.switch_to.window(main_tab)
 
+        for link in href_links:
+            try:
+                href = link.get_attribute("href")
+            except Exception:
+                continue
+            if not href:
+                continue
+            href = href.strip()
+            # 無効なhrefをスキップ
+            if href.startswith("javascript:") or href.startswith("#"):
+                continue
+
+            # 相対パスは現在のURLを基に絶対URL化
+            try:
+                if href.startswith("/"):
+                    href = urljoin(driver.current_url, href)
+            except Exception:
+                pass
+
+            # 内部リンクのみ処理（ドメインに pc.moppy.jp を含むもの）
+            try:
+                parsed = urlparse(href)
+                hostname = parsed.hostname or ""
+            except Exception:
+                hostname = ""
+
+            if "pc.moppy.jp" in hostname:
+                try:
+                    # 同タブで開いて戻る。これで新しいタブを大量に生成しない
+                    driver.get(href)
+                    sleep(1)
+                    driver.back()
+                except Exception:
+                    continue
+            else:
+                # 外部ドメインはスキップ（重い外部コンテンツを開かない）
+                continue
+
+        # チェックボックス群は元の実装通り処理
         sleep(1)
         checkbox_elems = driver.find_elements(
             By.XPATH, "//input[@type='checkbox'][@tabindex]"
