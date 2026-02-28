@@ -18,6 +18,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.select import Select
 from typing import Optional, List
 from urllib.parse import urlparse, urljoin
+
 try:
     import psutil
 except Exception:
@@ -106,7 +107,12 @@ class AnswerQuestionnaire:
             return False
         return False
 
-    def _check_driver_resource(self, driver: webdriver.Chrome, cpu_thresh: float = 80.0, mem_mb_thresh: float = 500.0):
+    def _check_driver_resource(
+        self,
+        driver: webdriver.Chrome,
+        cpu_thresh: float = 80.0,
+        mem_mb_thresh: float = 500.0,
+    ):
         """ドライバ（とその子プロセス）のCPU%とRSS(MB)を取得し、閾値を超えているか判定する。
         psutil がなければ常に False を返す。
         戻り値: (overloaded: bool, cpu_percent: float, mem_mb: float)
@@ -173,7 +179,11 @@ class AnswerQuestionnaire:
         # cookies を追加するためにベースドメインへ移動
         if cookies:
             try:
-                base = urlparse(self._login_url).scheme + "://" + urlparse(self._login_url).hostname
+                base = (
+                    urlparse(self._login_url).scheme
+                    + "://"
+                    + urlparse(self._login_url).hostname
+                )
                 new_driver.get(base)
                 for c in cookies:
                     try:
@@ -716,6 +726,11 @@ class AnswerQuestionnaire:
                 for radio_vals in variants:
                     print(f"{url}のアンケートを回答します")
                     driver.get(url)
+                    # 初回ロード時に同意チェックボックスがあれば押す
+                    try:
+                        self.check_policy_checkbox(driver)
+                    except Exception:
+                        pass
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
                     if answer_btn:
@@ -725,7 +740,7 @@ class AnswerQuestionnaire:
                             except Exception:
                                 continue
 
-                    # macromill
+                    # マクロミル
                     answer_btns = driver.find_elements(By.NAME, "nextButton")
                     if answer_btns:
                         for answer_btn in answer_btns:
@@ -758,20 +773,28 @@ class AnswerQuestionnaire:
                             consecutive_overload += 1
                             if consecutive_overload >= overload_check_threshold:
                                 restart_count += 1
-                                print(f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。")
+                                print(
+                                    f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。"
+                                )
                                 # 再起動回数上限を超えたらそのURLをスキップ
                                 if restart_count > max_restarts:
-                                    print(f"再起動上限に達したためスキップします: {url}")
+                                    print(
+                                        f"再起動上限に達したためスキップします: {url}"
+                                    )
                                     self._unable_to_answer_urls.append(url)
                                     lock_detected = True
                                     break
 
                                 # driver を再作成・復旧
                                 try:
-                                    driver = self._restart_driver_preserve_cookies(driver)
+                                    driver = self._restart_driver_preserve_cookies(
+                                        driver
+                                    )
                                 except Exception:
                                     # 再起動失敗時はスキップ
-                                    print(f"ドライバ再起動に失敗しました。{url} をスキップします。")
+                                    print(
+                                        f"ドライバ再起動に失敗しました。{url} をスキップします。"
+                                    )
                                     self._unable_to_answer_urls.append(url)
                                     lock_detected = True
                                     break
@@ -853,6 +876,11 @@ class AnswerQuestionnaire:
                 for radio_vals in variants:
                     print(f"{url}のアンケートを回答します")
                     driver.get(url)
+                    # 初回ロード時に同意チェックボックスがあれば押す
+                    try:
+                        self.check_policy_checkbox(driver)
+                    except Exception:
+                        pass
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
                     if answer_btn:
@@ -895,16 +923,24 @@ class AnswerQuestionnaire:
                             consecutive_overload += 1
                             if consecutive_overload >= overload_check_threshold:
                                 restart_count += 1
-                                print(f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。")
+                                print(
+                                    f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。"
+                                )
                                 if restart_count > max_restarts:
-                                    print(f"再起動上限に達したためスキップします: {url}")
+                                    print(
+                                        f"再起動上限に達したためスキップします: {url}"
+                                    )
                                     self._unable_to_answer_urls.append(url)
                                     lock_detected = True
                                     break
                                 try:
-                                    driver = self._restart_driver_preserve_cookies(driver)
+                                    driver = self._restart_driver_preserve_cookies(
+                                        driver
+                                    )
                                 except Exception:
-                                    print(f"ドライバ再起動に失敗しました。{url} をスキップします。")
+                                    print(
+                                        f"ドライバ再起動に失敗しました。{url} をスキップします。"
+                                    )
                                     self._unable_to_answer_urls.append(url)
                                     lock_detected = True
                                     break
