@@ -28,6 +28,7 @@ _CURRENT_DIR = Path(__file__).absolute().parent.parent
 _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
 cookies_file = _CURRENT_DIR / "moppy.pkl"  # クッキーを保存するファイルの名前
 _UNABLE_TO_URL = _CURRENT_DIR / "unable_to_answer.csv"
+_ANSWERED_URLS = _CURRENT_DIR / "answered.csv"  # 既に回答したURLを記録するファイル
 
 login_url = "https://ssl.pc.moppy.jp/login/"
 questionnaire_url = "https://pc.moppy.jp/research/"
@@ -55,11 +56,23 @@ class AnswerQuestionnaire:
         self._email = email
         self._password = password
 
+        # load unable-to-answer list
         with open(_UNABLE_TO_URL, "r") as f:
             reader = csv.reader(f)
             unable_to_answer_urls = [url[0] for url in reader]
 
+        # load already answered list if exists
+        answered_urls = []
+        if os.path.exists(_ANSWERED_URLS):
+            try:
+                with open(_ANSWERED_URLS, "r") as f2:
+                    reader2 = csv.reader(f2)
+                    answered_urls = [url[0] for url in reader2]
+            except Exception:
+                answered_urls = []
+
         self._unable_to_answer_urls = unable_to_answer_urls
+        self._answered_urls = answered_urls
 
     def _option_add_argument(self) -> None:
         self._options.add_argument("--headless")
@@ -106,6 +119,52 @@ class AnswerQuestionnaire:
         except Exception:
             return False
         return False
+
+    def _has_email_question(self, driver: webdriver.Chrome) -> bool:
+        """ページ内にメールアドレス入力欄があるかをチェックする"""
+        try:
+            elems = driver.find_elements(
+                By.XPATH,
+                "//input[@type='email']|"
+                + "//input[contains(translate(@name,'MAIL','mail'),'mail')]|"
+                + "//input[contains(translate(@placeholder,'メール','メール'),'メール')]",
+            )
+            return len(elems) > 0
+        except Exception:
+            return False
+
+    def _is_page_answerable(self, driver: webdriver.Chrome) -> bool:
+        """ページが実際に回答可能かを判定する。
+        以下の条件を確認：
+        1. 回答済みの表示がないか
+        2. フォーム要素（radio, checkbox, select, textarea）が存在するか
+        """
+        try:
+            page_source = driver.page_source
+
+            # 回答済みを示す一般的なテキストをチェック
+            answered_keywords = [
+                "回答済み",
+                "ご回答済み",
+                "終了しました",
+                "受け付けを終了",
+            ]
+            for keyword in answered_keywords:
+                if keyword in page_source:
+                    return False
+
+            # フォーム要素が存在するかチェック
+            form_elements = driver.find_elements(
+                By.XPATH,
+                "//input[@type='radio']|"
+                + "//input[@type='checkbox']|"
+                + "//select|"
+                + "//textarea",
+            )
+            return len(form_elements) > 0
+        except Exception:
+            # エラーが出たら、とりあえず回答可能と判定する
+            return True
 
     def _check_driver_resource(
         self,
@@ -301,7 +360,31 @@ class AnswerQuestionnaire:
             raise ValueError("回答できるアンケートが存在しませんでした。")
 
         urls = [url.get_attribute("href") for url in able_to_answer_urls]
-        return urls
+        # skip URLs we've already answered
+        urls = [u for u in urls if u not in self._answered_urls]
+
+        # ドライバを自分たちで作成した場合のみ、URLを検証して不要なものをフィルタリング
+        # (後から使う場合は、ドライバの状態を変えずに返すため、フィルタリングは行わない)
+        if created_driver:
+            validated_urls = []
+            for url in urls:
+                try:
+                    driver.get(url)
+                    sleep(1)
+                    if self._is_page_answerable(driver):
+                        validated_urls.append(url)
+                    else:
+                        print(f"既に回答済みまたは回答不可のため除外: {url}")
+                except Exception as e:
+                    print(f"URL検証エラー: {url} - {str(e)}")
+                    # エラーが出たものは validated_urls に含めない（保守的判定）
+
+            driver.close()
+            return validated_urls
+        else:
+            # ドライバが渡されている場合は、フィルタリングなしで返す
+            # (呼び出し元で続けて使う可能性があるため)
+            return urls
 
     def check_policy_checkbox(self, driver: webdriver.Chrome) -> None:
         try:
@@ -319,6 +402,31 @@ class AnswerQuestionnaire:
         except Exception:
             return
 
+    def _click_radio_elem(self, driver: webdriver.Chrome, elem) -> bool:
+        """ラジオボタン要素を 直接click → label経由click → JS経由click の順で試みる"""
+        try:
+            elem.click()
+            return True
+        except ElementNotInteractableException:
+            pass
+        except Exception:
+            return False
+
+        try:
+            elem_id = elem.get_attribute("id")
+            if elem_id:
+                label = driver.find_element(By.XPATH, f"//label[@for='{elem_id}']")
+                label.click()
+                return True
+        except Exception:
+            pass
+
+        try:
+            driver.execute_script("arguments[0].click();", elem)
+            return True
+        except Exception:
+            return False
+
     def click_radio(self, driver: webdriver.Chrome) -> None:
         # デフォルトではvalue='1'を優先する
         try:
@@ -326,20 +434,13 @@ class AnswerQuestionnaire:
                 By.XPATH, "//input[@type='radio'][@value='1']"
             )
             if len(radio_buttons) == 0:
-                # value=1が無ければ最初に見つかったラジオをクリックする
                 radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
                 for r in radios:
-                    try:
-                        r.click()
-                    except ElementNotInteractableException:
-                        continue
+                    self._click_radio_elem(driver, r)
                 return
 
             for radio in radio_buttons:
-                try:
-                    radio.click()
-                except ElementNotInteractableException:
-                    continue
+                self._click_radio_elem(driver, radio)
         except Exception:
             pass
 
@@ -372,25 +473,18 @@ class AnswerQuestionnaire:
                             By.XPATH,
                             f"//input[@type='radio' and @name='{name}' and @value='{v}']",
                         )
-                        try:
-                            elem.click()
+                        if self._click_radio_elem(driver, elem):
                             clicked = True
                             break
-                        except ElementNotInteractableException:
-                            continue
                     except NoSuchElementException:
                         continue
 
                 if not clicked:
-                    # 候補のいずれもクリックできなければ、そのグループの最初の選択肢をクリック
                     try:
                         first_elem = driver.find_element(
                             By.XPATH, f"//input[@type='radio' and @name='{name}']"
                         )
-                        try:
-                            first_elem.click()
-                        except ElementNotInteractableException:
-                            continue
+                        self._click_radio_elem(driver, first_elem)
                     except Exception:
                         continue
         except Exception:
@@ -716,7 +810,8 @@ class AnswerQuestionnaire:
             if elapsed_time - start > 60 * 90:
                 break
 
-            if url in self._unable_to_answer_urls:
+            # skip URLs that were previously unable or already answered
+            if url in self._unable_to_answer_urls or url in self._answered_urls:
                 continue
 
             try:
@@ -731,6 +826,14 @@ class AnswerQuestionnaire:
                         self.check_policy_checkbox(driver)
                     except Exception:
                         pass
+
+                    # メールアドレス入力欄がある場合はスキップ
+                    if self._has_email_question(driver):
+                        print(
+                            f"メールアドレスの入力が必要なためスキップしました: {url}"
+                        )
+                        self._unable_to_answer_urls.append(url)
+                        break
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
                     if answer_btn:
@@ -830,6 +933,8 @@ class AnswerQuestionnaire:
                     sleep(2)
                     if checked_onclick_attr:
                         print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
                         success = True
                         break
                     else:
@@ -848,6 +953,7 @@ class AnswerQuestionnaire:
 
         driver.close()
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
+        _write_answered_urls(self._answered_urls)
 
     def answer_with_driver(self, driver: webdriver.Chrome, urls: List[str]) -> None:
         """既存のドライバを使ってアンケートに回答するロジック（`answer()`の内部ループを抽出）"""
@@ -866,7 +972,8 @@ class AnswerQuestionnaire:
             if elapsed_time - start > 60 * 90:
                 break
 
-            if url in self._unable_to_answer_urls:
+            # skip previously unable or already answered URLs
+            if url in self._unable_to_answer_urls or url in self._answered_urls:
                 continue
 
             try:
@@ -881,6 +988,14 @@ class AnswerQuestionnaire:
                         self.check_policy_checkbox(driver)
                     except Exception:
                         pass
+
+                    # メールアドレス入力欄がある場合はスキップ
+                    if self._has_email_question(driver):
+                        print(
+                            f"メールアドレスの入力が必要なためスキップしました: {url}"
+                        )
+                        self._unable_to_answer_urls.append(url)
+                        break
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
                     if answer_btn:
@@ -974,6 +1089,8 @@ class AnswerQuestionnaire:
                     sleep(2)
                     if checked_onclick_attr:
                         print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
                         success = True
                         break
                     else:
@@ -992,6 +1109,7 @@ class AnswerQuestionnaire:
 
         driver.close()
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
+        _write_answered_urls(self._answered_urls)
 
     def run(self) -> None:
         """1つのセッションでログインしてそのまま回答処理を進めるためのユーティリティメソッド"""
@@ -1031,5 +1149,14 @@ def _write_unable_to_answer_urls(urls: List[str]) -> None:
     for url in urls:
         urls_list.append([url])
     with open(_UNABLE_TO_URL, "w") as f:
+        writer = csv.writer(f)
+        writer.writerows(urls_list)
+
+
+def _write_answered_urls(urls: List[str]) -> None:
+    urls_list: List[List[str]] = []
+    for url in urls:
+        urls_list.append([url])
+    with open(_ANSWERED_URLS, "w") as f:
         writer = csv.writer(f)
         writer.writerows(urls_list)

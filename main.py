@@ -16,8 +16,8 @@ def set_args():
 def main():
     args = set_args()
     questionnaires = AnswerQuestionnaire(email=args.email, password=args.password)
-    questionnaires.save_cookie_as_pickle()
-    questionnaires.answer()
+    # Use a single session: login once and continue
+    questionnaires.run()
 
 
 main()
