@@ -1,4 +1,6 @@
 .*
+!/.env.sample
 */*.pkl
 *.pyc
 *.csv
+.env

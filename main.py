@@ -4,8 +4,16 @@ from pathlib import Path
 
 from selenium_moppy import AnswerQuestionnaire
 
+# Prefer python-dotenv if available
+try:
+    from dotenv import load_dotenv
+    _HAS_DOTENV = True
+except Exception:
+    _HAS_DOTENV = False
+
 
 def _load_dotenv(path: Path) -> dict:
+    """Simple fallback .env loader used only if python-dotenv not available."""
     env = {}
     if not path.exists():
         return env
@@ -44,18 +52,27 @@ def set_args():
 
     args = parser.parse_args()
 
-    # Load .env if present and fill missing args
-    env_path = Path(".env")
-    env = _load_dotenv(env_path)
+    # Prefer python-dotenv when available
+    if _HAS_DOTENV:
+        # load environment from .env into os.environ
+        try:
+            load_dotenv()
+        except Exception:
+            pass
 
-    if not args.email and env.get("EMAIL"):
-        args.email = env.get("EMAIL")
-    if not args.password and env.get("PASSWORD"):
-        args.password = env.get("PASSWORD")
+    # Load .env fallback if python-dotenv is not present
+    env_path = Path(".env")
+    env = _load_dotenv(env_path) if not _HAS_DOTENV else {}
+
+    # Priority: CLI args > environment variables > .env fallback
+    if not args.email:
+        args.email = os.environ.get("EMAIL") or env.get("EMAIL")
+    if not args.password:
+        args.password = os.environ.get("PASSWORD") or env.get("PASSWORD")
 
     # If still missing, fail
     if not args.email or not args.password:
-        parser.error("email and password must be provided via --email/--password or a .env file with EMAIL and PASSWORD entries")
+        parser.error("email and password must be provided via --email/--password, environment variables, or a .env file with EMAIL and PASSWORD entries")
 
     return args
 
