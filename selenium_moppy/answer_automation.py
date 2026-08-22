@@ -1,8 +1,11 @@
 import csv
+import json
 import logging
 import os
 import pickle
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import sleep
 
@@ -29,6 +32,7 @@ _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
 cookies_file = _CURRENT_DIR / "moppy.pkl"  # クッキーを保存するファイルの名前
 _UNABLE_TO_URL = _CURRENT_DIR / "unable_to_answer.csv"
 _ANSWERED_URLS = _CURRENT_DIR / "answered.csv"  # 既に回答したURLを記録するファイル
+_PARALLEL_STATE_FILE = _CURRENT_DIR / ".moppy_parallel_state.json"
 
 login_url = "https://ssl.pc.moppy.jp/login/"
 questionnaire_url = "https://pc.moppy.jp/research/"
@@ -55,11 +59,16 @@ class AnswerQuestionnaire:
         self._login_url = login_url
         self._email = email
         self._password = password
+        self._state_lock = threading.Lock()
+        self._in_progress_urls: List[str] = []
 
         # load unable-to-answer list
-        with open(_UNABLE_TO_URL, "r") as f:
-            reader = csv.reader(f)
-            unable_to_answer_urls = [url[0] for url in reader]
+        try:
+            with open(_UNABLE_TO_URL, "r") as f:
+                reader = csv.reader(f)
+                unable_to_answer_urls = [url[0] for url in reader]
+        except FileNotFoundError:
+            unable_to_answer_urls = []
 
         # load already answered list if exists
         answered_urls = []
@@ -73,6 +82,10 @@ class AnswerQuestionnaire:
 
         self._unable_to_answer_urls = unable_to_answer_urls
         self._answered_urls = answered_urls
+        self._load_resume_state()
+        self._unable_to_answer_urls = list(dict.fromkeys(self._unable_to_answer_urls))
+        self._answered_urls = list(dict.fromkeys(self._answered_urls))
+        self._in_progress_urls = list(dict.fromkeys(self._in_progress_urls))
 
     def _option_add_argument(self) -> None:
         self._options.add_argument("--headless")
@@ -301,6 +314,93 @@ class AnswerQuestionnaire:
             return True
 
         return False
+
+    def _login_to_site(self, driver: webdriver.Chrome) -> None:
+        """ログイン画面へ遷移して認証を実施する。"""
+        driver.get(self._login_url)
+        email_form = driver.find_element(By.XPATH, "//input[@name='mail']")
+        email_form.clear()
+        email_form.send_keys(self._email)
+        password_form = driver.find_element(By.XPATH, "//input[@name='pass']")
+        password_form.clear()
+        password_form.send_keys(self._password)
+        sleep(2)
+
+        submit_button = driver.find_element(
+            By.XPATH, "//button[@data-ga-label='ログイン']"
+        )
+        submit_button.submit()
+
+        if not self._check_success_login(driver):
+            raise RuntimeError("Moppy login failed")
+
+    def _add_url_to_list(self, url: str, *, collection: str) -> None:
+        if not url:
+            return
+        target = getattr(self, f"_{collection}")
+        with self._state_lock:
+            if url not in target:
+                target.append(url)
+        self._save_resume_state()
+
+    def _worker_log(self, worker_id: int, message: str) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] [worker-{worker_id}] {message}", flush=True)
+
+    def _load_resume_state(self) -> None:
+        if not os.path.exists(_PARALLEL_STATE_FILE):
+            return
+        try:
+            with open(_PARALLEL_STATE_FILE, "r") as f:
+                payload = json.load(f)
+            if isinstance(payload.get("answered_urls"), list):
+                self._answered_urls = payload["answered_urls"]
+            if isinstance(payload.get("unable_to_answer_urls"), list):
+                self._unable_to_answer_urls = payload["unable_to_answer_urls"]
+            if isinstance(payload.get("in_progress_urls"), list):
+                self._in_progress_urls = payload["in_progress_urls"]
+        except Exception:
+            self._in_progress_urls = []
+
+    def _save_resume_state(self) -> None:
+        payload = {
+            "answered_urls": self._answered_urls,
+            "unable_to_answer_urls": self._unable_to_answer_urls,
+            "in_progress_urls": self._in_progress_urls,
+        }
+        with open(_PARALLEL_STATE_FILE, "w") as f:
+            json.dump(payload, f)
+
+    def _mark_in_progress(self, url: str, worker_id: int) -> None:
+        if not url:
+            return
+        with self._state_lock:
+            if url not in self._in_progress_urls:
+                self._in_progress_urls.append(url)
+        self._save_resume_state()
+        self._worker_log(worker_id, f"開始: {url}")
+
+    def _mark_done(self, url: str, worker_id: int, *, success: bool) -> None:
+        if not url:
+            return
+        with self._state_lock:
+            self._in_progress_urls = [u for u in self._in_progress_urls if u != url]
+            if success and url not in self._answered_urls:
+                self._answered_urls.append(url)
+            elif not success and url not in self._unable_to_answer_urls:
+                self._unable_to_answer_urls.append(url)
+        self._save_resume_state()
+        self._worker_log(
+            worker_id,
+            f"完了: {url} ({'answered' if success else 'skipped'})",
+        )
+
+    def _write_shared_csv(self) -> None:
+        with self._state_lock:
+            _write_unable_to_answer_urls(self._unable_to_answer_urls)
+            _write_answered_urls(self._answered_urls)
+            if os.path.exists(_PARALLEL_STATE_FILE):
+                os.remove(_PARALLEL_STATE_FILE)
 
     def get_questionnaire_urls(
         self, driver: Optional[webdriver.Chrome] = None
@@ -832,7 +932,7 @@ class AnswerQuestionnaire:
                         print(
                             f"メールアドレスの入力が必要なためスキップしました: {url}"
                         )
-                        self._unable_to_answer_urls.append(url)
+                        self._add_url_to_list(url, collection="unable_to_answer_urls")
                         break
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
@@ -884,7 +984,7 @@ class AnswerQuestionnaire:
                                     print(
                                         f"再起動上限に達したためスキップします: {url}"
                                     )
-                                    self._unable_to_answer_urls.append(url)
+                                    self._add_url_to_list(url, collection="unable_to_answer_urls")
                                     lock_detected = True
                                     break
 
@@ -898,7 +998,7 @@ class AnswerQuestionnaire:
                                     print(
                                         f"ドライバ再起動に失敗しました。{url} をスキップします。"
                                     )
-                                    self._unable_to_answer_urls.append(url)
+                                    self._add_url_to_list(url, collection="unable_to_answer_urls")
                                     lock_detected = True
                                     break
 
@@ -934,7 +1034,7 @@ class AnswerQuestionnaire:
                     if checked_onclick_attr:
                         print("回答を完了しました！", url)
                         if url not in self._answered_urls:
-                            self._answered_urls.append(url)
+                            self._add_url_to_list(url, collection="answered_urls")
                         success = True
                         break
                     else:
@@ -943,19 +1043,20 @@ class AnswerQuestionnaire:
 
                 if not success:
                     print("回答を完了できなかったアンケート: ", url)
-                    self._unable_to_answer_urls.append(url)
+                    self._add_url_to_list(url, collection="unable_to_answer_urls")
             except ElementNotInteractableException:
-                self._unable_to_answer_urls.append(url)
+                self._add_url_to_list(url, collection="unable_to_answer_urls")
             except Exception:
                 print("回答を完了できなかったアンケート: ", url)
-                self._unable_to_answer_urls.append(url)
+                self._add_url_to_list(url, collection="unable_to_answer_urls")
                 continue
 
         driver.close()
-        _write_unable_to_answer_urls(self._unable_to_answer_urls)
-        _write_answered_urls(self._answered_urls)
+        self._write_shared_csv()
 
-    def answer_with_driver(self, driver: webdriver.Chrome, urls: List[str]) -> None:
+    def answer_with_driver(
+        self, driver: webdriver.Chrome, urls: List[str], worker_id: int = 0
+    ) -> None:
         """既存のドライバを使ってアンケートに回答するロジック（`answer()`の内部ループを抽出）"""
         sleep(1)
 
@@ -976,12 +1077,13 @@ class AnswerQuestionnaire:
             if url in self._unable_to_answer_urls or url in self._answered_urls:
                 continue
 
+            self._mark_in_progress(url, worker_id)
             try:
                 # 試すラジオの優先値のバリエーション
                 variants = [["1"], ["2"], ["3"]]
                 success = False
                 for radio_vals in variants:
-                    print(f"{url}のアンケートを回答します")
+                    self._worker_log(worker_id, f"{url}のアンケートを回答します")
                     driver.get(url)
                     # 初回ロード時に同意チェックボックスがあれば押す
                     try:
@@ -991,10 +1093,12 @@ class AnswerQuestionnaire:
 
                     # メールアドレス入力欄がある場合はスキップ
                     if self._has_email_question(driver):
-                        print(
-                            f"メールアドレスの入力が必要なためスキップしました: {url}"
+                        self._worker_log(
+                            worker_id,
+                            f"メールアドレスの入力が必要なためスキップしました: {url}",
                         )
-                        self._unable_to_answer_urls.append(url)
+                        self._add_url_to_list(url, collection="unable_to_answer_urls")
+                        self._mark_done(url, worker_id, success=False)
                         break
 
                     answer_btn = driver.find_elements(By.XPATH, "//*[@onclick]")
@@ -1038,14 +1142,17 @@ class AnswerQuestionnaire:
                             consecutive_overload += 1
                             if consecutive_overload >= overload_check_threshold:
                                 restart_count += 1
-                                print(
-                                    f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。"
+                                self._worker_log(
+                                    worker_id,
+                                    f"リソース閾値超過を検出しました: {url} (cpu={cpu_p:.1f}%, mem={mem_mb:.1f}MB)。ドライバを再起動します。",
                                 )
                                 if restart_count > max_restarts:
-                                    print(
-                                        f"再起動上限に達したためスキップします: {url}"
+                                    self._worker_log(
+                                        worker_id,
+                                        f"再起動上限に達したためスキップします: {url}",
                                     )
-                                    self._unable_to_answer_urls.append(url)
+                                    self._add_url_to_list(url, collection="unable_to_answer_urls")
+                                    self._mark_done(url, worker_id, success=False)
                                     lock_detected = True
                                     break
                                 try:
@@ -1053,10 +1160,12 @@ class AnswerQuestionnaire:
                                         driver
                                     )
                                 except Exception:
-                                    print(
-                                        f"ドライバ再起動に失敗しました。{url} をスキップします。"
+                                    self._worker_log(
+                                        worker_id,
+                                        f"ドライバ再起動に失敗しました。{url} をスキップします。",
                                     )
-                                    self._unable_to_answer_urls.append(url)
+                                    self._add_url_to_list(url, collection="unable_to_answer_urls")
+                                    self._mark_done(url, worker_id, success=False)
                                     lock_detected = True
                                     break
                                 consecutive_overload = 0
@@ -1088,9 +1197,10 @@ class AnswerQuestionnaire:
                     checked_onclick_attr = self.check_onclick_attr(driver)
                     sleep(2)
                     if checked_onclick_attr:
-                        print("回答を完了しました！", url)
+                        self._worker_log(worker_id, f"回答を完了しました！ {url}")
                         if url not in self._answered_urls:
-                            self._answered_urls.append(url)
+                            self._add_url_to_list(url, collection="answered_urls")
+                        self._mark_done(url, worker_id, success=True)
                         success = True
                         break
                     else:
@@ -1098,18 +1208,20 @@ class AnswerQuestionnaire:
                         continue
 
                 if not success:
-                    print("回答を完了できなかったアンケート: ", url)
-                    self._unable_to_answer_urls.append(url)
+                    self._worker_log(worker_id, f"回答を完了できなかったアンケート: {url}")
+                    self._add_url_to_list(url, collection="unable_to_answer_urls")
+                    self._mark_done(url, worker_id, success=False)
             except ElementNotInteractableException:
-                self._unable_to_answer_urls.append(url)
+                self._add_url_to_list(url, collection="unable_to_answer_urls")
+                self._mark_done(url, worker_id, success=False)
             except Exception:
-                print("回答を完了できなかったアンケート: ", url)
-                self._unable_to_answer_urls.append(url)
+                self._worker_log(worker_id, f"回答を完了できなかったアンケート: {url}")
+                self._add_url_to_list(url, collection="unable_to_answer_urls")
+                self._mark_done(url, worker_id, success=False)
                 continue
 
         driver.close()
-        _write_unable_to_answer_urls(self._unable_to_answer_urls)
-        _write_answered_urls(self._answered_urls)
+        self._write_shared_csv()
 
     def run(self) -> None:
         """1つのセッションでログインしてそのまま回答処理を進めるためのユーティリティメソッド"""
@@ -1142,6 +1254,70 @@ class AnswerQuestionnaire:
         except Exception:
             # answer_with_driver 内で driver.close() を呼ぶためここでは何もしない
             pass
+
+    def _run_worker(self, worker_id: int, urls: List[str]) -> None:
+        """単一のブラウザで特定のURL群をまとめて回答する。"""
+        driver = self._create_driver()
+        self._worker_log(worker_id, "ブラウザ起動")
+        try:
+            self._login_to_site(driver)
+            self._worker_log(worker_id, "ログイン完了")
+            self.answer_with_driver(driver, urls, worker_id=worker_id)
+        except KeyboardInterrupt:
+            self._worker_log(worker_id, "中断要求を受信しました")
+            raise
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    def clear_resume_state(self) -> None:
+        self._in_progress_urls = []
+        if os.path.exists(_PARALLEL_STATE_FILE):
+            os.remove(_PARALLEL_STATE_FILE)
+
+    def run_parallel(self, worker_count: int = 3) -> None:
+        """3つ程度のブラウザワーカーを並列起動し、URLを分割して同時に回答する。"""
+        if worker_count < 1:
+            raise ValueError("worker_count は 1 以上でなければなりません")
+
+        self._load_resume_state()
+        urls = self.get_questionnaire_urls()
+        if not urls:
+            self._write_shared_csv()
+            return
+
+        pending_urls = [
+            u
+            for u in list(dict.fromkeys(self._in_progress_urls + urls))
+            if u not in self._answered_urls and u not in self._unable_to_answer_urls
+        ]
+
+        if not pending_urls:
+            self._write_shared_csv()
+            return
+
+        self._worker_log(0, f"{len(pending_urls)} 件のURLを {worker_count} worker で処理開始")
+        batches = [[] for _ in range(worker_count)]
+        for index, url in enumerate(pending_urls):
+            batches[index % worker_count].append(url)
+
+        try:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(self._run_worker, worker_idx + 1, batch)
+                    for worker_idx, batch in enumerate(batches)
+                    if batch
+                ]
+                for future in futures:
+                    future.result()
+        except KeyboardInterrupt:
+            self._save_resume_state()
+            print("中断要求を受け取りました。次回の起動時に再開します。", flush=True)
+            raise
+
+        self._write_shared_csv()
 
 
 def _write_unable_to_answer_urls(urls: List[str]) -> None:
