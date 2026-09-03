@@ -1,6 +1,5 @@
-# Domain package facade for the Moppy automation domain.
-# This file exposes the domain-level API while keeping legacy implementation
-# in selenium_moppy for compatibility.
-from selenium_moppy.answer_automation import AnswerQuestionnaire
+# Domain package for the Moppy automation domain.
+# Implementation moved here from selenium_moppy for a domain-driven layout.
+from .answer_automation import AnswerQuestionnaire
 
 __all__ = ["AnswerQuestionnaire"]
