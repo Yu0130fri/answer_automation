@@ -16,6 +16,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
 )
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.select import Select
@@ -110,7 +111,11 @@ class AnswerQuestionnaire:
         # 自動再生を抑制
         self._options.add_argument("--autoplay-policy=user-gesture-required")
 
-        return webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
+        if _DRIVER_PATH.exists():
+            return webdriver.Chrome(
+                service=Service(str(_DRIVER_PATH)), options=self._options
+            )
+        return webdriver.Chrome(options=self._options)
 
     def _load_cookies(self, driver: webdriver.Chrome) -> None:
         if not os.path.exists(self._cookie_file):
@@ -281,7 +286,7 @@ class AnswerQuestionnaire:
             os.remove(self._cookie_file)
 
         self._option_add_argument()
-        driver = webdriver.Chrome(executable_path=_DRIVER_PATH, options=self._options)
+        driver = self._create_driver()
         driver.get(self._login_url)
 
         # login
