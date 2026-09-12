@@ -29,6 +29,7 @@ _DRIVER_PATH = _CURRENT_DIR / "driver/chromedriver"
 cookies_file = _CURRENT_DIR / "moppy.pkl"  # クッキーを保存するファイルの名前
 _UNABLE_TO_URL = _CURRENT_DIR / "unable_to_answer.csv"
 _ANSWERED_URLS = _CURRENT_DIR / "answered.csv"  # 既に回答したURLを記録するファイル
+_FAIL_COUNTS = _CURRENT_DIR / "fail_counts.csv"  # 失敗回数を記録するファイル
 
 login_url = "https://ssl.pc.moppy.jp/login/"
 questionnaire_url = "https://pc.moppy.jp/research/"
@@ -73,6 +74,23 @@ class AnswerQuestionnaire:
 
         self._unable_to_answer_urls = unable_to_answer_urls
         self._answered_urls = answered_urls
+
+        # 失敗回数カウント（2回失敗で unable_to_answer.csv に書き込む）
+        self._fail_counts: dict = {}
+        if os.path.exists(_FAIL_COUNTS):
+            try:
+                with open(_FAIL_COUNTS, "r") as f3:
+                    reader3 = csv.reader(f3)
+                    for row in reader3:
+                        if len(row) < 2:
+                            continue
+                        try:
+                            self._fail_counts[row[0]] = int(row[1])
+                        except ValueError:
+                            # 不正な行はスキップし、他の行のカウントは保持する
+                            continue
+            except Exception:
+                pass
 
     def _option_add_argument(self) -> None:
         self._options.add_argument("--headless")
@@ -120,6 +138,12 @@ class AnswerQuestionnaire:
             return False
         return False
 
+    def _record_failure(self, url: str) -> None:
+        """失敗回数を記録し、2回以上失敗したURLのみ unable_to_answer に追加する"""
+        self._fail_counts[url] = self._fail_counts.get(url, 0) + 1
+        if self._fail_counts[url] >= 2 and url not in self._unable_to_answer_urls:
+            self._unable_to_answer_urls.append(url)
+
     def _has_email_question(self, driver: webdriver.Chrome) -> bool:
         """ページ内にメールアドレス入力欄があるかをチェックする"""
         try:
@@ -165,6 +189,29 @@ class AnswerQuestionnaire:
         except Exception:
             # エラーが出たら、とりあえず回答可能と判定する
             return True
+
+    def _is_completion_page(self, driver: webdriver.Chrome) -> bool:
+        """アンケートの完了ページかどうかをページ内容で判定する"""
+        COMPLETION_KEYWORDS = [
+            "ありがとうございました",
+            "回答ありがとう",
+            "ご回答ありがとう",
+            "ポイントが加算",
+            "ポイントを獲得",
+            "アンケートは終了",
+            "回答が完了",
+            "完了しました",
+            "回答を受け付けました",
+            "謝礼ポイント",
+        ]
+        try:
+            page_source = driver.page_source
+            for kw in COMPLETION_KEYWORDS:
+                if kw in page_source:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _check_driver_resource(
         self,
@@ -362,6 +409,7 @@ class AnswerQuestionnaire:
         urls = [url.get_attribute("href") for url in able_to_answer_urls]
         # skip URLs we've already answered
         urls = [u for u in urls if u not in self._answered_urls]
+        urls = [u for u in urls if "theoremreach.com" not in u]
 
         # ドライバを自分たちで作成した場合のみ、URLを検証して不要なものをフィルタリング
         # (後から使う場合は、ドライバの状態を変えずに返すため、フィルタリングは行わない)
@@ -401,6 +449,53 @@ class AnswerQuestionnaire:
 
         except Exception:
             return
+
+    def _click_resolving_onclick_ancestor(self, driver: webdriver.Chrome, elem) -> bool:
+        """テキストにマッチした要素ではなく、liタグ等の onclick を持つ親要素が
+        実際の開始ボタンとして機能している特殊なケースに対応してクリックする。
+        例: <li onclick="..."><a href="javascript:void();" onclick="javascript:return false;">次へ</a></li>
+        この場合 a 自身の onclick は無効化されているため、onclick を持つ直近の
+        親要素（自分自身を含む）を探してそちらをクリック対象にする。
+        """
+        target = elem
+        try:
+            ancestors = elem.find_elements(By.XPATH, "ancestor-or-self::*[@onclick][1]")
+            if ancestors:
+                target = ancestors[0]
+        except Exception:
+            pass
+
+        try:
+            target.click()
+            return True
+        except Exception:
+            pass
+
+        try:
+            driver.execute_script("arguments[0].click();", target)
+            return True
+        except Exception:
+            return False
+
+    def _click_consent_start_button(self, driver: webdriver.Chrome) -> bool:
+        """「同意して回答する」ボタン（マクロミルの開始ボタンなど）を探してクリックする。
+        input[type='button'] を想定しているが、button / a 要素もフォールバックで対象にする。
+        """
+        xpath = (
+            "//*[self::input[@type='button'] or self::button or self::a]"
+            "[contains(normalize-space(@value), '同意して回答する') or "
+            "contains(normalize-space(.), '同意して回答する')]"
+        )
+        try:
+            buttons = driver.find_elements(By.XPATH, xpath)
+        except Exception:
+            return False
+
+        clicked = False
+        for btn in buttons:
+            if self._click_resolving_onclick_ancestor(driver, btn):
+                clicked = True
+        return clicked
 
     def _click_radio_elem(self, driver: webdriver.Chrome, elem) -> bool:
         """ラジオボタン要素を 直接click → label経由click → JS経由click の順で試みる"""
@@ -714,7 +809,7 @@ class AnswerQuestionnaire:
         try:
             onclick_buttons = driver.find_elements(By.XPATH, "//*[@onclick]")
             if len(onclick_buttons) == 0:
-                pass
+                return False
             for btn in onclick_buttons:
                 try:
                     btn.click()
@@ -734,6 +829,63 @@ class AnswerQuestionnaire:
             print("ブラウザで回答が推奨されるためskipします。")
         except Exception:
             return False
+
+        return False
+
+    def _click_advance_button(self, driver: webdriver.Chrome) -> bool:
+        """「次へ」「回答する」等の進行ボタンを探してクリックする。
+        クリックできた場合は True を返す。
+        テキストベースで探した後、クラス名・name属性でフォールバックする。
+        """
+        # 優先順位順のボタン文言（部分一致）
+        ADVANCE_TEXTS = [
+            "回答する",
+            "回答を再開",
+            "次へ",
+            "次のページ",
+            "進む",
+            "続ける",
+            "続きへ",
+            "送信する",
+            "送信",
+            "OK",
+            "next",
+            "Next",
+        ]
+
+        # テキスト・value属性で探す（button / a / input）
+        for text in ADVANCE_TEXTS:
+            xpath = (
+                f"//*[self::button or self::a or "
+                f"self::input[@type='button'] or self::input[@type='submit']]"
+                f"[contains(normalize-space(.), '{text}') or "
+                f"contains(normalize-space(@value), '{text}')]"
+            )
+            try:
+                btn = driver.find_element(By.XPATH, xpath)
+                if self._click_resolving_onclick_ancestor(driver, btn):
+                    return True
+                continue
+            except NoSuchElementException:
+                continue
+            except Exception:
+                continue
+
+        # フォールバック: クラス名 'btn' を持つリンク
+        try:
+            btn = driver.find_element(By.XPATH, "//a[contains(@class, 'btn')]")
+            btn.click()
+            return True
+        except Exception:
+            pass
+
+        # フォールバック: name='next'
+        try:
+            btn = driver.find_element(By.XPATH, "//*[@name='next']")
+            btn.click()
+            return True
+        except Exception:
+            pass
 
         return False
 
@@ -757,17 +909,7 @@ class AnswerQuestionnaire:
         # 動画再生
         self.play_video(driver)
         # 次へボタン
-        try:
-            try:
-                btn = driver.find_element(By.XPATH, "//a[contains(@class, 'btn')]")
-                btn.click()
-            except NoSuchElementException:
-                btn = driver.find_element(By.XPATH, "//*[@name='next']")
-                btn.click()
-        except NoSuchElementException:
-            return
-        except Exception:
-            return
+        self._click_advance_button(driver)
 
     def play_video(self, driver: webdriver.Chrome) -> None:
         """動画の再生"""
@@ -827,6 +969,12 @@ class AnswerQuestionnaire:
                     except Exception:
                         pass
 
+                    # マクロミル等の「同意して回答する」開始ボタンを押す
+                    try:
+                        self._click_consent_start_button(driver)
+                    except Exception:
+                        pass
+
                     # メールアドレス入力欄がある場合はスキップ
                     if self._has_email_question(driver):
                         print(
@@ -854,6 +1002,7 @@ class AnswerQuestionnaire:
 
                     # 同意ボタンをクリックする
                     self.check_policy_checkbox(driver)
+                    self._click_consent_start_button(driver)
 
                     has_onclick_attr: bool = True
                     sleep(2)
@@ -864,6 +1013,11 @@ class AnswerQuestionnaire:
                         answer_count += 1
                         sleep(1)
                         has_onclick_attr = self.check_onclick_attr(driver)
+
+                        # ループ内で完了ページに達した場合は早期終了
+                        if self._is_completion_page(driver):
+                            success = True
+                            break
 
                         # ページに排他や混雑を示す要素が無いか検出
                         if self._detect_lock(driver):
@@ -912,29 +1066,38 @@ class AnswerQuestionnaire:
                         if answer_count > 50:
                             break
 
+                    if success:
+                        print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
+                        break
+
                     if lock_detected:
                         # 違う回答バリエーションで再トライ
                         continue
 
-                    try:
-                        btn = driver.find_element(
-                            By.XPATH, "//a[contains(@class, 'btn')]"
-                        )
-                        try:
-                            btn.click()
-                        except Exception:
-                            pass
-                    except NoSuchElementException:
-                        pass
-                    except Exception:
-                        continue
-
-                    checked_onclick_attr = self.check_onclick_attr(driver)
-                    sleep(2)
-                    if checked_onclick_attr:
+                    # ループ終了時点で既に完了ページにいる場合
+                    if self._is_completion_page(driver):
                         print("回答を完了しました！", url)
                         if url not in self._answered_urls:
                             self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
+                        success = True
+                        break
+
+                    self._click_advance_button(driver)
+
+                    self.check_onclick_attr(driver)
+                    sleep(2)
+                    if self._is_completion_page(driver):
+                        print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
                         success = True
                         break
                     else:
@@ -943,17 +1106,18 @@ class AnswerQuestionnaire:
 
                 if not success:
                     print("回答を完了できなかったアンケート: ", url)
-                    self._unable_to_answer_urls.append(url)
+                    self._record_failure(url)
             except ElementNotInteractableException:
-                self._unable_to_answer_urls.append(url)
+                self._record_failure(url)
             except Exception:
                 print("回答を完了できなかったアンケート: ", url)
-                self._unable_to_answer_urls.append(url)
+                self._record_failure(url)
                 continue
 
         driver.close()
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
         _write_answered_urls(self._answered_urls)
+        _write_fail_counts(self._fail_counts)
 
     def answer_with_driver(self, driver: webdriver.Chrome, urls: List[str]) -> None:
         """既存のドライバを使ってアンケートに回答するロジック（`answer()`の内部ループを抽出）"""
@@ -989,6 +1153,12 @@ class AnswerQuestionnaire:
                     except Exception:
                         pass
 
+                    # マクロミル等の「同意して回答する」開始ボタンを押す
+                    try:
+                        self._click_consent_start_button(driver)
+                    except Exception:
+                        pass
+
                     # メールアドレス入力欄がある場合はスキップ
                     if self._has_email_question(driver):
                         print(
@@ -1016,6 +1186,7 @@ class AnswerQuestionnaire:
 
                     # 同意ボタンをクリックする
                     self.check_policy_checkbox(driver)
+                    self._click_consent_start_button(driver)
 
                     has_onclick_attr: bool = True
                     sleep(2)
@@ -1026,6 +1197,11 @@ class AnswerQuestionnaire:
                         answer_count += 1
                         sleep(1)
                         has_onclick_attr = self.check_onclick_attr(driver)
+
+                        # ループ内で完了ページに達した場合は早期終了
+                        if self._is_completion_page(driver):
+                            success = True
+                            break
 
                         # ページに排他や混雑を示す要素が無いか検出
                         if self._detect_lock(driver):
@@ -1068,29 +1244,38 @@ class AnswerQuestionnaire:
                         if answer_count > 50:
                             break
 
+                    if success:
+                        print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
+                        break
+
                     if lock_detected:
                         # 違う回答バリエーションで再トライ
                         continue
 
-                    try:
-                        btn = driver.find_element(
-                            By.XPATH, "//a[contains(@class, 'btn')]"
-                        )
-                        try:
-                            btn.click()
-                        except Exception:
-                            pass
-                    except NoSuchElementException:
-                        pass
-                    except Exception:
-                        continue
-
-                    checked_onclick_attr = self.check_onclick_attr(driver)
-                    sleep(2)
-                    if checked_onclick_attr:
+                    # ループ終了時点で既に完了ページにいる場合
+                    if self._is_completion_page(driver):
                         print("回答を完了しました！", url)
                         if url not in self._answered_urls:
                             self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
+                        success = True
+                        break
+
+                    self._click_advance_button(driver)
+
+                    self.check_onclick_attr(driver)
+                    sleep(2)
+                    if self._is_completion_page(driver):
+                        print("回答を完了しました！", url)
+                        if url not in self._answered_urls:
+                            self._answered_urls.append(url)
+                        # 回答に成功したら失敗回数カウントをクリアする
+                        self._fail_counts.pop(url, None)
                         success = True
                         break
                     else:
@@ -1099,17 +1284,18 @@ class AnswerQuestionnaire:
 
                 if not success:
                     print("回答を完了できなかったアンケート: ", url)
-                    self._unable_to_answer_urls.append(url)
+                    self._record_failure(url)
             except ElementNotInteractableException:
-                self._unable_to_answer_urls.append(url)
+                self._record_failure(url)
             except Exception:
                 print("回答を完了できなかったアンケート: ", url)
-                self._unable_to_answer_urls.append(url)
+                self._record_failure(url)
                 continue
 
         driver.close()
         _write_unable_to_answer_urls(self._unable_to_answer_urls)
         _write_answered_urls(self._answered_urls)
+        _write_fail_counts(self._fail_counts)
 
     def run(self) -> None:
         """1つのセッションでログインしてそのまま回答処理を進めるためのユーティリティメソッド"""
@@ -1160,3 +1346,10 @@ def _write_answered_urls(urls: List[str]) -> None:
     with open(_ANSWERED_URLS, "w") as f:
         writer = csv.writer(f)
         writer.writerows(urls_list)
+
+
+def _write_fail_counts(counts: dict) -> None:
+    with open(_FAIL_COUNTS, "w", newline="") as f:
+        writer = csv.writer(f)
+        for url, count in counts.items():
+            writer.writerow([url, count])

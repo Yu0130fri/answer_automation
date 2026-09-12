@@ -1,4 +1,5 @@
 .*
-*/*.pkl
+*.pkl
 *.pyc
 *.csv
+chromedriver
