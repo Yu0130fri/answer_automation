@@ -636,27 +636,25 @@ class AnswerQuestionnaire:
 
     def write_text(self, driver: webdriver.Chrome) -> None:
         _dummy_text = "31"
+        filled = False
         try:
             text_forms = driver.find_elements(By.XPATH, "//input[@type='text']")
-            if len(text_forms) == 0:
-                return
             for radio in text_forms:
                 radio.send_keys(_dummy_text)
-            sleep(1)
-            return
+                filled = True
         except Exception:
-            pass
+            text_forms = []
 
         try:
             text_forms = driver.find_elements(By.XPATH, "//input[@type='tel']")
-            if len(text_forms) == 0:
-                return
             for radio in text_forms:
-                radio.send_keys(_dummy_text)
-            sleep(1)
-            return
+                radio.send_keys("44")
+                filled = True
         except Exception:
-            return
+            pass
+
+        if filled:
+            sleep(1)
 
     def select_btn(self, driver: webdriver.Chrome) -> None:
         # dropdownが存在すれば先にclickしておく
