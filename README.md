@@ -13,20 +13,36 @@ Moppy（モッピー）のアンケートを自動で回答するツールです
 
 ## 必要環境
 
-- Python 3.9+
+- Python 3.14.8 (Python 3.14 stable maintenance release; Python does not designate LTS releases)
 - Google Chrome
 - ChromeDriver（バージョンは Chrome に合わせること）
 
 ## セットアップ
 
 ```bash
+# macOS (Homebrew): Python 3.14 の最新版を導入・更新
+brew update
+brew install python@3.14
+# すでにインストール済みの場合は brew upgrade python@3.14
+
+# Python 3.14専用の仮想環境を作成
+"$(brew --prefix python@3.14)/bin/python3.14" -m venv .venv
+source .venv/bin/activate
+
 # 依存パッケージをインストール
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 実行中のPythonバージョンを確認
+python --version
+# Python 3.14.8
 
 # ChromeDriver を配置
 cp /path/to/chromedriver driver/chromedriver
 chmod +x driver/chromedriver
 ```
+
+Pythonには公式のLTS指定はありません。Python 3.14系は安定版としてメンテナンスされており、現在のサポート予定は2030年10月までです。3.15系が安定版になるまでは、3.14系の最新メンテナンスリリースを使用してください。既存のPython/pyenv環境は削除・上書きせず、このプロジェクトの`.venv`内で切り替えます。
 
 ## 使い方
 
